@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useRef } from "react";
 
-import { Sidebar, BottomPanel, Header } from "@renderer/components";
+import { Sidebar, BottomPanel, Header, Toast } from "@renderer/components";
 
 import {
   useAppDispatch,
   useAppSelector,
   useDownload,
   useLibrary,
+  useToast,
+  useUserDetails,
 } from "@renderer/hooks";
 
 import * as styles from "./app.css";
-import { themeClass } from "./theme.css";
 
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
@@ -18,10 +19,12 @@ import {
   clearSearch,
   setUserPreferences,
   toggleDraggingDisabled,
+  closeToast,
+  setUserDetails,
+  setProfileBackground,
+  setGameRunning,
 } from "@renderer/features";
-import { GameStatusHelper } from "@shared";
-
-document.body.classList.add(themeClass);
+import { useTranslation } from "react-i18next";
 
 export interface AppProps {
   children: React.ReactNode;
@@ -29,9 +32,14 @@ export interface AppProps {
 
 export function App() {
   const contentRef = useRef<HTMLDivElement>(null);
-  const { updateLibrary } = useLibrary();
+  const { updateLibrary, library } = useLibrary();
+
+  const { t } = useTranslation("app");
 
   const { clearDownload, setLastPacket } = useDownload();
+
+  const { fetchUserDetails, updateUserDetails, clearUserDetails } =
+    useUserDetails();
 
   const dispatch = useAppDispatch();
 
@@ -39,9 +47,14 @@ export function App() {
   const location = useLocation();
 
   const search = useAppSelector((state) => state.search.value);
+
   const draggingDisabled = useAppSelector(
     (state) => state.window.draggingDisabled
   );
+
+  const toast = useAppSelector((state) => state.toast);
+
+  const { showSuccessToast } = useToast();
 
   useEffect(() => {
     Promise.all([window.electron.getUserPreferences(), updateLibrary()]).then(
@@ -54,7 +67,7 @@ export function App() {
   useEffect(() => {
     const unsubscribe = window.electron.onDownloadProgress(
       (downloadProgress) => {
-        if (GameStatusHelper.isReady(downloadProgress.game.status)) {
+        if (downloadProgress.game.progress === 1) {
           clearDownload();
           updateLibrary();
           return;
@@ -68,6 +81,75 @@ export function App() {
       unsubscribe();
     };
   }, [clearDownload, setLastPacket, updateLibrary]);
+
+  useEffect(() => {
+    const cachedUserDetails = window.localStorage.getItem("userDetails");
+
+    if (cachedUserDetails) {
+      const { profileBackground, ...userDetails } =
+        JSON.parse(cachedUserDetails);
+
+      dispatch(setUserDetails(userDetails));
+      dispatch(setProfileBackground(profileBackground));
+    }
+
+    window.electron.isUserLoggedIn().then((isLoggedIn) => {
+      if (isLoggedIn) {
+        fetchUserDetails().then((response) => {
+          if (response) updateUserDetails(response);
+        });
+      }
+    });
+  }, [fetchUserDetails, updateUserDetails, dispatch]);
+
+  const onSignIn = useCallback(() => {
+    fetchUserDetails().then((response) => {
+      if (response) {
+        updateUserDetails(response);
+        showSuccessToast(t("successfully_signed_in"));
+      }
+    });
+  }, [fetchUserDetails, t, showSuccessToast, updateUserDetails]);
+
+  useEffect(() => {
+    const unsubscribe = window.electron.onGamesRunning((gamesRunning) => {
+      if (gamesRunning.length) {
+        const lastGame = gamesRunning[gamesRunning.length - 1];
+        const libraryGame = library.find(
+          (library) => library.id === lastGame.id
+        );
+
+        if (libraryGame) {
+          dispatch(
+            setGameRunning({
+              ...libraryGame,
+              sessionDurationInMillis: lastGame.sessionDurationInMillis,
+            })
+          );
+          return;
+        }
+      }
+      dispatch(setGameRunning(null));
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [dispatch, library]);
+
+  useEffect(() => {
+    const listeners = [
+      window.electron.onSignIn(onSignIn),
+      window.electron.onLibraryBatchComplete(() => {
+        updateLibrary();
+      }),
+      window.electron.onSignOut(() => clearUserDetails()),
+    ];
+
+    return () => {
+      listeners.forEach((unsubscribe) => unsubscribe());
+    };
+  }, [onSignIn, updateLibrary, clearUserDetails]);
 
   const handleSearch = useCallback(
     (query: string) => {
@@ -109,6 +191,10 @@ export function App() {
     });
   }, [dispatch, draggingDisabled]);
 
+  const handleToastClose = useCallback(() => {
+    dispatch(closeToast());
+  }, [dispatch]);
+
   return (
     <>
       {window.electron.platform === "win32" && (
@@ -116,6 +202,13 @@ export function App() {
           <h4>Hydra</h4>
         </div>
       )}
+
+      <Toast
+        visible={toast.visible}
+        message={toast.message}
+        type={toast.type}
+        onClose={handleToastClose}
+      />
 
       <main>
         <Sidebar />
@@ -132,6 +225,7 @@ export function App() {
           </section>
         </article>
       </main>
+
       <BottomPanel />
     </>
   );

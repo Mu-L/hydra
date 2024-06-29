@@ -5,20 +5,20 @@ import {
   MenuItemConstructorOptions,
   Tray,
   app,
+  nativeImage,
   shell,
 } from "electron";
 import { is } from "@electron-toolkit/utils";
-import { t } from "i18next";
+import i18next, { t } from "i18next";
 import path from "node:path";
 import icon from "@resources/icon.png?asset";
 import trayIcon from "@resources/tray-icon.png?asset";
 import { gameRepository, userPreferencesRepository } from "@main/repository";
 import { IsNull, Not } from "typeorm";
+import { HydraApi } from "./hydra-api";
 
 export class WindowManager {
   public static mainWindow: Electron.BrowserWindow | null = null;
-  public static splashWindow: Electron.BrowserWindow | null = null;
-  public static isReadyToShowMainWindow = false;
 
   private static loadURL(hash = "") {
     // HMR for renderer base on electron-vite cli.
@@ -37,44 +37,8 @@ export class WindowManager {
     }
   }
 
-  private static loadSplashURL() {
-    // HMR for renderer base on electron-vite cli.
-    // Load the remote URL for development or the local html file for production.
-    if (is.dev && process.env["ELECTRON_RENDERER_URL"]) {
-      this.splashWindow?.loadURL(
-        `${process.env["ELECTRON_RENDERER_URL"]}#/splash`
-      );
-    } else {
-      this.splashWindow?.loadFile(
-        path.join(__dirname, "../renderer/index.html"),
-        {
-          hash: "splash",
-        }
-      );
-    }
-  }
-
-  public static createSplashScreen() {
-    if (this.splashWindow) return;
-
-    this.splashWindow = new BrowserWindow({
-      width: 380,
-      height: 380,
-      frame: false,
-      resizable: false,
-      backgroundColor: "#1c1c1c",
-      webPreferences: {
-        preload: path.join(__dirname, "../preload/index.mjs"),
-        sandbox: false,
-      },
-    });
-
-    this.loadSplashURL();
-    this.splashWindow.removeMenu();
-  }
-
   public static createMainWindow() {
-    if (this.mainWindow || !this.isReadyToShowMainWindow) return;
+    if (this.mainWindow) return;
 
     this.mainWindow = new BrowserWindow({
       width: 1200,
@@ -94,6 +58,7 @@ export class WindowManager {
         preload: path.join(__dirname, "../preload/index.mjs"),
         sandbox: false,
       },
+      show: false,
     });
 
     this.loadURL();
@@ -101,6 +66,7 @@ export class WindowManager {
 
     this.mainWindow.on("ready-to-show", () => {
       if (!app.isPackaged) WindowManager.mainWindow?.webContents.openDevTools();
+      WindowManager.mainWindow?.show();
     });
 
     this.mainWindow.on("close", async () => {
@@ -115,10 +81,46 @@ export class WindowManager {
     });
   }
 
-  public static prepareMainWindowAndCloseSplash() {
-    this.isReadyToShowMainWindow = true;
-    this.splashWindow?.close();
-    this.createMainWindow();
+  public static openAuthWindow() {
+    if (this.mainWindow) {
+      const authWindow = new BrowserWindow({
+        width: 600,
+        height: 640,
+        backgroundColor: "#1c1c1c",
+        parent: this.mainWindow,
+        modal: true,
+        show: false,
+        maximizable: false,
+        resizable: false,
+        minimizable: false,
+        webPreferences: {
+          sandbox: false,
+          nodeIntegrationInSubFrames: true,
+        },
+      });
+
+      authWindow.removeMenu();
+
+      const searchParams = new URLSearchParams({
+        lng: i18next.language,
+      });
+
+      authWindow.loadURL(
+        `https://auth.hydra.losbroxas.org/?${searchParams.toString()}`
+      );
+
+      authWindow.once("ready-to-show", () => {
+        authWindow.show();
+      });
+
+      authWindow.webContents.on("will-navigate", (_event, url) => {
+        if (url.startsWith("hydralauncher://auth")) {
+          authWindow.close();
+
+          HydraApi.handleExternalAuth(url);
+        }
+      });
+    }
   }
 
   public static redirect(hash: string) {
@@ -130,7 +132,16 @@ export class WindowManager {
   }
 
   public static createSystemTray(language: string) {
-    const tray = new Tray(trayIcon);
+    let tray;
+
+    if (process.platform === "darwin") {
+      const macIcon = nativeImage
+        .createFromPath(trayIcon)
+        .resize({ width: 24, height: 24 });
+      tray = new Tray(macIcon);
+    } else {
+      tray = new Tray(trayIcon);
+    }
 
     const updateSystemTray = async () => {
       const games = await gameRepository.find({
@@ -141,7 +152,7 @@ export class WindowManager {
         },
         take: 5,
         order: {
-          updatedAt: "DESC",
+          lastTimePlayed: "DESC",
         },
       });
 
@@ -191,9 +202,14 @@ export class WindowManager {
       return contextMenu;
     };
 
+    const showContextMenu = async () => {
+      const contextMenu = await updateSystemTray();
+      tray.popUpContextMenu(contextMenu);
+    };
+
     tray.setToolTip("Hydra");
 
-    if (process.platform === "win32" || process.platform === "linux") {
+    if (process.platform !== "darwin") {
       tray.addListener("click", () => {
         if (this.mainWindow) {
           if (WindowManager.mainWindow?.isMinimized())
@@ -206,10 +222,10 @@ export class WindowManager {
         this.createMainWindow();
       });
 
-      tray.addListener("right-click", async () => {
-        const contextMenu = await updateSystemTray();
-        tray.popUpContextMenu(contextMenu);
-      });
+      tray.addListener("right-click", showContextMenu);
+    } else {
+      tray.addListener("click", showContextMenu);
+      tray.addListener("right-click", showContextMenu);
     }
   }
 }
